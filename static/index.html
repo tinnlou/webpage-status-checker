@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webpage Status Checker</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+        }
+
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        input[type="number"],
+        input[type="file"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #d2d2d7;
+            border-radius: 6px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background-color: #0071e3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        button:disabled {
+            background-color: #999;
+            cursor: not-allowed;
+        }
+
+        button.stop {
+            background-color: #ff3b30;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .stat-box {
+            background: #f5f5f7;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #86868b;
+        }
+
+        #progressBar {
+            width: 100%;
+            height: 10px;
+            background: #e5e5ea;
+            border-radius: 5px;
+            margin-top: 20px;
+            overflow: hidden;
+        }
+
+        #progressFill {
+            height: 100%;
+            background: #34c759;
+            width: 0%;
+            transition: width 0.5s;
+        }
+
+        .error-log {
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>网站链接状态检测工具</h1>
+
+    <div class="card">
+        <div class="form-group">
+            <label>1. 上传链接列表 (txt/csv) <a href="/static/template.csv" download="template.csv"
+                    style="font-size: 12px; color: #0071e3; margin-left: 10px;">下载模板</a></label>
+            <input type="file" id="fileInput" accept=".txt,.csv">
+            <div id="uploadStatus" style="margin-top: 5px; font-size: 14px; color: #34c759;"></div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="form-group">
+            <label>2. 参数配置</label>
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+                <div>
+                    <label>并发数</label>
+                    <input type="number" id="concurrency" value="50">
+                </div>
+                <div>
+                    <label>每秒请求限制 (RPS)</label>
+                    <input type="number" id="rps" value="100">
+                </div>
+                <div>
+                    <label>超时时间 (秒)</label>
+                    <input type="number" id="timeout" value="10">
+                </div>
+                <div>
+                    <label>重试次数</label>
+                    <input type="number" id="retries" value="1">
+                </div>
+            </div>
+        </div>
+        <button id="startBtn" onclick="startCheck(false)">开始新检测</button>
+        <button id="pauseBtn" class="stop" onclick="pauseCheck()" disabled>暂停</button>
+        <button id="resumeBtn" onclick="startCheck(true)" disabled style="background-color: #ff9500;">继续</button>
+        <button onclick="downloadResults()" style="margin-left: 10px; background-color: #34c759;">下载结果</button>
+    </div>
+
+    <div class="card">
+        <h3>检测进度</h3>
+        <div id="progressBar">
+            <div id="progressFill"></div>
+        </div>
+        <div class="stats" style="grid-template-columns: repeat(4, 1fr);">
+            <div class="stat-box">
+                <div class="stat-value" id="totalCount">0</div>
+                <div class="stat-label">总数</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value" id="checkedCount">0</div>
+                <div class="stat-label">已检测</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value" id="errorCount" style="color: #ff3b30;">0</div>
+                <div class="stat-label">错误数</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value" id="eta">--:--</div>
+                <div class="stat-label">预计剩余时间</div>
+            </div>
+        </div>
+
+        <div style="margin-top: 20px;">
+            <h4>最近错误日志</h4>
+            <div id="errorLog" class="error-log"
+                style="background: #f5f5f7; padding: 10px; border-radius: 8px; height: 150px; overflow-y: auto; font-family: monospace; font-size: 12px; color: #ff3b30;">
+                <div style="color: #86868b; text-align: center; padding-top: 60px;">暂无错误</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let pollInterval;
+
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            if (!fileInput.files[0]) return;
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                document.getElementById('uploadStatus').innerText = `已上传 ${data.count} 个链接`;
+                document.getElementById('totalCount').innerText = data.count;
+            } catch (e) {
+                alert('上传失败');
+            }
+        }
+
+        document.getElementById('fileInput').addEventListener('change', uploadFile);
+
+        async function startCheck(resume = false) {
+            const config = {
+                concurrency: parseInt(document.getElementById('concurrency').value),
+                requests_per_second: parseInt(document.getElementById('rps').value),
+                timeout: parseInt(document.getElementById('timeout').value),
+                retries: parseInt(document.getElementById('retries').value),
+                resume: resume
+            };
+
+            try {
+                const res = await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                if (res.ok) {
+                    setRunningState(true);
+                    pollInterval = setInterval(updateStatus, 1000);
+                } else {
+                    const err = await res.json();
+                    alert(err.detail);
+                }
+            } catch (e) {
+                alert('启动失败');
+            }
+        }
+
+        async function pauseCheck() {
+            await fetch('/api/stop', { method: 'POST' });
+            setRunningState(false);
+            clearInterval(pollInterval);
+        }
+
+        function setRunningState(isRunning) {
+            document.getElementById('startBtn').disabled = isRunning;
+            document.getElementById('pauseBtn').disabled = !isRunning;
+            document.getElementById('resumeBtn').disabled = isRunning; // Disable resume while running
+
+            // Enable/Disable inputs
+            document.getElementById('concurrency').disabled = isRunning;
+            document.getElementById('rps').disabled = isRunning;
+            document.getElementById('timeout').disabled = isRunning;
+            document.getElementById('retries').disabled = isRunning;
+        }
+
+        async function updateStatus() {
+            const res = await fetch('/api/status');
+            const data = await res.json();
+
+            document.getElementById('totalCount').innerText = data.total;
+            document.getElementById('checkedCount').innerText = data.checked;
+            document.getElementById('errorCount').innerText = data.errors;
+
+            // Update Progress Bar
+            if (data.total > 0) {
+                const pct = (data.checked / data.total) * 100;
+                document.getElementById('progressFill').style.width = pct + '%';
+            }
+
+            // Update ETA
+            if (data.running && data.start_time && data.checked > 0) {
+                const startTime = new Date(data.start_time);
+                const now = new Date();
+                const elapsedSeconds = (now - startTime) / 1000;
+                const speed = data.checked / elapsedSeconds; // items per second
+                const remaining = data.total - data.checked;
+
+                if (speed > 0) {
+                    const etaSeconds = remaining / speed;
+                    const etaHours = Math.floor(etaSeconds / 3600);
+                    const etaMinutes = Math.floor((etaSeconds % 3600) / 60);
+                    const etaSecs = Math.floor(etaSeconds % 60);
+                    document.getElementById('eta').innerText =
+                        `${etaHours.toString().padStart(2, '0')}:${etaMinutes.toString().padStart(2, '0')}:${etaSecs.toString().padStart(2, '0')}`;
+                }
+            } else if (!data.running && data.checked === data.total) {
+                document.getElementById('eta').innerText = "完成";
+            } else {
+                document.getElementById('eta').innerText = "--:--";
+            }
+
+            // Update Error Log
+            const errorLog = document.getElementById('errorLog');
+            if (data.recent_errors && data.recent_errors.length > 0) {
+                errorLog.innerHTML = data.recent_errors.map(e => `<div>${e}</div>`).join('');
+                // Auto scroll to bottom
+                errorLog.scrollTop = errorLog.scrollHeight;
+            } else if (data.checked === 0) {
+                errorLog.innerHTML = '<div style="color: #86868b; text-align: center; padding-top: 60px;">暂无错误</div>';
+            }
+
+            if (!data.running) {
+                // If backend stopped running, update UI
+                if (data.checked > 0 && data.checked === data.total) {
+                    clearInterval(pollInterval);
+                    setRunningState(false);
+                    document.getElementById('resumeBtn').disabled = true; // Cannot resume if finished
+                    alert('检测完成！');
+                } else if (pollInterval) {
+                    // If we were polling but it stopped (e.g. manual pause or error), ensure UI reflects paused
+                    // But if we just paused manually, setRunningState(false) was already called.
+                    // This is mostly for if it stopped unexpectedly.
+                    // For now, let's just enable resume if not finished.
+                    document.getElementById('resumeBtn').disabled = false;
+                }
+            }
+        }
+
+        function downloadResults() {
+            window.location.href = '/api/results';
+        }
+    </script>
+</body>
+
+</html>
