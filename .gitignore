@@ -6,6 +6,5 @@ results.db
 test_urls.txt
 test_dupes.txt
 test_advanced.txt
-verify_features.py
 verify_advanced.py
 results.csv

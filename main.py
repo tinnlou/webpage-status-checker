@@ -52,21 +52,24 @@ import random
 # Global state (simple in-memory for this tool)
 class JobState:
     is_running = False
+    is_processing = False # New flag to track actual background task execution
     total_urls = 0
     checked_count = 0
     error_count = 0
     start_time = None
     urls_to_check = []
     recent_errors = [] # List of strings
+    current_task = None # Reference to the main background task
     
 state = JobState()
 
 class CheckConfig(BaseModel):
-    concurrency: int = 50
-    requests_per_second: int = 100
+    concurrency: int = 10
+    requests_per_second: int = 20
     timeout: int = 10
     resume: bool = False
     retries: int = 1
+    custom_user_agent: str = None # Optional custom UA for identification
 
 @app.get("/")
 async def read_index():
@@ -76,59 +79,76 @@ async def read_index():
 async def upload_file(file: UploadFile = File(...)):
     content = await file.read()
     text = content.decode("utf-8")
-    # Deduplicate URLs
-    urls = list(set([line.strip() for line in text.splitlines() if line.strip()]))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    original_count = len(lines)
+    urls = list(set(lines))
+    deduped_count = len(urls)
+    duplicates = original_count - deduped_count
+    
     state.urls_to_check = urls
-    state.total_urls = len(urls)
+    state.total_urls = deduped_count
     state.checked_count = 0
     state.error_count = 0
     state.recent_errors = []
-    return {"count": len(urls), "message": "File uploaded successfully (duplicates removed)"}
+    return {
+        "count": deduped_count, 
+        "duplicates_removed": duplicates,
+        "message": "File uploaded successfully"
+    }
 
-async def worker(sem, rate_limiter, session, url, timeout, retries):
-    async with sem:
-        for attempt in range(retries + 1):
-            # Simple rate limiting
-            await rate_limiter.acquire()
+async def worker(sem, rate_limiter, session, url, timeout, retries, custom_ua=None):
+    try:
+        async with sem:
+            for attempt in range(retries + 1):
+                # Check if cancelled
+                if not state.is_running:
+                    return
+
+                # Simple rate limiting
+                await rate_limiter.acquire()
+                
+                # Use custom UA if provided, otherwise rotate
+                ua = custom_ua if custom_ua else random.choice(USER_AGENTS)
+                headers = {"User-Agent": ua}
+                
+                try:
+                    async with session.get(url, timeout=timeout, ssl=False, headers=headers) as response:
+                        status = response.status
+                        if status >= 400:
+                            error = response.reason
+                        else:
+                            error = None
+                            break # Success (or at least got a response), stop retrying
+                except Exception as e:
+                    status = 0
+                    error = f"{type(e).__name__}: {str(e)}"
+                    # If it's the last attempt, we keep the error. Otherwise continue to retry.
+                    if attempt < retries:
+                        continue
             
-            headers = {"User-Agent": random.choice(USER_AGENTS)}
-            
+            # Update state
+            state.checked_count += 1
+            if status == 0 or status >= 400:
+                state.error_count += 1
+                # Add to recent errors (keep last 50)
+                err_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {url} -> {status} ({error})"
+                state.recent_errors.append(err_msg)
+                if len(state.recent_errors) > 50:
+                    state.recent_errors.pop(0)
+                
+            # Save to DB
             try:
-                async with session.get(url, timeout=timeout, ssl=False, headers=headers) as response:
-                    status = response.status
-                    if status >= 400:
-                        error = response.reason
-                    else:
-                        error = None
-                        break # Success (or at least got a response), stop retrying
+                conn = sqlite3.connect(DB_PATH)
+                c = conn.cursor()
+                c.execute("INSERT INTO results (url, status_code, error, timestamp) VALUES (?, ?, ?, ?)",
+                          (url, status, error, datetime.now().isoformat()))
+                conn.commit()
+                conn.close()
             except Exception as e:
-                status = 0
-                error = str(e)
-                # If it's the last attempt, we keep the error. Otherwise continue to retry.
-                if attempt < retries:
-                    continue
-        
-        # Update state
-        state.checked_count += 1
-        if status == 0 or status >= 400:
-            state.error_count += 1
-            # Add to recent errors (keep last 50)
-            err_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {url} -> {status} ({error})"
-            state.recent_errors.append(err_msg)
-            if len(state.recent_errors) > 50:
-                state.recent_errors.pop(0)
-            
-        # Save to DB (batching would be better for 1M+, but keeping simple for now)
-        # In a real high-perf scenario, we'd push to a queue and have a separate writer
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("INSERT INTO results (url, status_code, error, timestamp) VALUES (?, ?, ?, ?)",
-                      (url, status, error, datetime.now().isoformat()))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.error(f"DB Error: {e}")
+                logger.error(f"DB Error: {e}")
+    except asyncio.CancelledError:
+        # Task was cancelled, just exit
+        pass
 
 class RateLimiter:
     def __init__(self, rate_limit):
@@ -152,49 +172,61 @@ class RateLimiter:
                 self.tokens -= 1
 
 async def run_checks(config: CheckConfig):
-    state.is_running = True
-    state.start_time = datetime.now()
-    
-    checked_urls = set()
-    if config.resume:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT url FROM results")
-        checked_urls = set(row[0] for row in c.fetchall())
-        conn.close()
-        # Update checked count based on DB
-        state.checked_count = len(checked_urls)
-        # Recalculate errors if needed, but for now we trust the DB count
-        # (Error count might be desynced if we restart server, but that's acceptable for this scope)
-    
-    sem = asyncio.Semaphore(config.concurrency)
-    rate_limiter = RateLimiter(config.requests_per_second)
-    
-    async with aiohttp.ClientSession() as session:
-        tasks = []
-        for url in state.urls_to_check:
-            if not state.is_running:
-                break
-            if config.resume and url in checked_urls:
-                continue
-                
-            task = asyncio.create_task(worker(sem, rate_limiter, session, url, config.timeout, config.retries))
-            tasks.append(task)
+    state.is_processing = True
+    state.current_task = asyncio.current_task()
+    print(f"--- Starting Job ---")
+    print(f"Mode: {'Resume' if config.resume else 'New Start'}")
+    print(f"Config: Concurrency={config.concurrency}, RPS={config.requests_per_second}, Timeout={config.timeout}s, Retries={config.retries}, UA={'Custom' if config.custom_user_agent else 'Random'}")
+    try:
+        state.is_running = True
+        state.start_time = datetime.now()
         
-        if tasks:
-            await asyncio.gather(*tasks)
-    
-    state.is_running = False
+        checked_urls = set()
+        if config.resume:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT url FROM results")
+            checked_urls = set(row[0] for row in c.fetchall())
+            conn.close()
+            state.checked_count = len(checked_urls)
+        
+        sem = asyncio.Semaphore(config.concurrency)
+        rate_limiter = RateLimiter(config.requests_per_second)
+        
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for url in state.urls_to_check:
+                if not state.is_running:
+                    break
+                if config.resume and url in checked_urls:
+                    continue
+                    
+                task = asyncio.create_task(worker(sem, rate_limiter, session, url, config.timeout, config.retries, config.custom_user_agent))
+                tasks.append(task)
+            
+            if tasks:
+                # Wait for all tasks, but allow cancellation
+                await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        print("Job cancelled")
+    finally:
+        state.is_running = False
+        state.is_processing = False
+        state.current_task = None
 
 @app.post("/api/start")
 async def start_check(config: CheckConfig, background_tasks: BackgroundTasks):
     if state.is_running:
         raise HTTPException(status_code=400, detail="Job already running")
+    if state.is_processing:
+        # If stuck, allow force restart after 5 seconds or manual intervention?
+        # For now, let's assume the fix works.
+        raise HTTPException(status_code=400, detail="Previous job is still stopping, please wait a moment")
+        
     if not state.urls_to_check:
         raise HTTPException(status_code=400, detail="No URLs uploaded")
-    
+
     if not config.resume:
-        # Clear previous results only if NOT resuming
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("DELETE FROM results")
@@ -211,7 +243,10 @@ async def start_check(config: CheckConfig, background_tasks: BackgroundTasks):
 @app.post("/api/stop")
 async def stop_check():
     state.is_running = False
-    return {"message": "Stopping..."}
+    # Force cancel the main task if it exists
+    if state.current_task:
+        state.current_task.cancel()
+    return {"message": "Stopping"}
 
 @app.get("/api/status")
 async def get_status():

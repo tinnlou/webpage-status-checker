@@ -140,13 +140,19 @@
                     <label>每秒请求限制 (RPS)</label>
                     <input type="number" id="rps" value="100">
                 </div>
-                <div>
+                <div class="input-group">
                     <label>超时时间 (秒)</label>
                     <input type="number" id="timeout" value="10">
                 </div>
-                <div>
-                    <label>重试次数</label>
+                <div class="input-group">
+                    <label>失败重试 (次)</label>
                     <input type="number" id="retries" value="1">
+                </div>
+            </div>
+            <div class="config-grid" style="grid-template-columns: 1fr; margin-top: 10px;">
+                <div class="input-group">
+                    <label>自定义 User-Agent (选填，用于身份标识)</label>
+                    <input type="text" id="customUA" placeholder="例如: MyCompany-Test-Bot/1.0">
                 </div>
             </div>
         </div>
@@ -202,7 +208,7 @@
             try {
                 const res = await fetch('/api/upload', { method: 'POST', body: formData });
                 const data = await res.json();
-                document.getElementById('uploadStatus').innerText = `已上传 ${data.count} 个链接`;
+                document.getElementById('uploadStatus').innerText = `已上传 ${data.count} 个链接 (已去重 ${data.duplicates_removed} 个)`;
                 document.getElementById('totalCount').innerText = data.count;
             } catch (e) {
                 alert('上传失败');
@@ -211,12 +217,17 @@
 
         document.getElementById('fileInput').addEventListener('change', uploadFile);
 
+        // Set safe defaults
+        document.getElementById('concurrency').value = 10;
+        document.getElementById('rps').value = 20;
+
         async function startCheck(resume = false) {
             const config = {
                 concurrency: parseInt(document.getElementById('concurrency').value),
                 requests_per_second: parseInt(document.getElementById('rps').value),
                 timeout: parseInt(document.getElementById('timeout').value),
                 retries: parseInt(document.getElementById('retries').value),
+                custom_user_agent: document.getElementById('customUA').value.trim() || null,
                 resume: resume
             };
 
